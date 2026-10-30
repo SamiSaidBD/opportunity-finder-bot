@@ -1,4 +1,5 @@
 import os
+import re
 import json
 import urllib.request
 import urllib.error
@@ -6,7 +7,12 @@ import urllib.error
 GEMINI_KEY = os.environ["GEMINI_API_KEY"]
 TG_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 TG_CHANNEL = os.environ["TELEGRAM_CHANNEL"]
-MODELS = ["gemini-flash-lite-latest", "gemini-flash-latest"]
+MODELS = [
+    "gemini-flash-lite-latest",
+    "gemini-flash-latest",
+    "gemini-2.5-flash-lite",
+    "gemini-2.5-flash",
+]
 
 PROMPT = """Use Google Search to find recent Reddit discussions (from the last 30 days if possible) where people complain about a specific problem, or ask for a tool or solution that doesn't seem to exist.
 List 5 different discussions. For each one give: the subreddit, a one-line description of the problem, and what people in the comments said.
@@ -55,7 +61,7 @@ def send(text):
 
 result = None
 used = ""
-last_error = ""
+errors = []
 for model in MODELS:
     try:
         result = post_json(
@@ -69,15 +75,22 @@ for model in MODELS:
         used = model
         break
     except urllib.error.HTTPError as e:
-        last_error = f"{model}: {e.code} {e.read().decode('utf-8')[:300]}"
-        print("ব্যর্থ:", last_error)
+        body = e.read().decode("utf-8")
+        try:
+            msg = json.loads(body)["error"]["message"][:100]
+        except Exception:
+            msg = body[:100]
+        quota = re.findall(r'"quota(?:Metric|Id|Value)":\s*"([^"]+)"', body)
+        errors.append(f"{model}: {e.code} {msg}\n   {' | '.join(quota[:4])}")
+        print("ব্যর্থ:", model, e.code)
+        print(body[:2000])
     except Exception as e:
-        last_error = f"{model}: {e}"
-        print("ব্যর্থ:", last_error)
+        errors.append(f"{model}: {e}")
+        print("ব্যর্থ:", model, e)
 
 if result is None:
-    send("❌ Search grounding টেস্ট ব্যর্থ\n" + last_error)
-    raise SystemExit(last_error)
+    send("❌ Search grounding টেস্ট ব্যর্থ\n\n" + "\n\n".join(errors))
+    raise SystemExit("সব মডেল ব্যর্থ")
 
 cand = result["candidates"][0]
 text = "".join(p.get("text", "") for p in cand.get("content", {}).get("parts", []))
@@ -96,10 +109,12 @@ print("সার্চ কোয়েরি:", queries)
 print("সব সোর্স:", urls)
 
 lines = [
-    f"🧪 Search grounding টেস্ট (মডেল: {used})",
+    f"🧪 Search grounding টেস্ট সফল (মডেল: {used})",
     "সার্চ কোয়েরি: " + (" | ".join(queries[:5]) or "(কোনোটা নেই)"),
     f"মোট সোর্স: {len(urls)}, এর মধ্যে Reddit: {len(reddit)}",
 ]
+if errors:
+    lines.append("আগের ব্যর্থ মডেল: " + ", ".join(e.split(":")[0] for e in errors))
 if not chunks:
     lines.append("⚠️ গ্রাউন্ডিং তথ্য আসেনি, মডেল সম্ভবত সার্চই করেনি")
 lines += ["", "Reddit লিংক:"]
