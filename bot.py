@@ -1,5 +1,6 @@
 import os
 import re
+import sys
 import json
 import html
 import time
@@ -11,6 +12,7 @@ GEMINI_KEY = os.environ["GEMINI_API_KEY"]
 TG_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 TG_CHANNEL = os.environ["TELEGRAM_CHANNEL"]
 MODEL = "gemini-flash-lite-latest"
+RECORD_FILE = "data/posted.json"
 
 # প্রতিটি শিরোনামের জন্য ইমোজি
 LABELS = {
@@ -32,6 +34,20 @@ LABELS = {
 
 def esc(s):
     return html.escape(s, quote=False)
+
+
+def load_records():
+    try:
+        with open(RECORD_FILE, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def save_records(rec):
+    os.makedirs("data", exist_ok=True)
+    with open(RECORD_FILE, "w", encoding="utf-8") as f:
+        json.dump(rec, f, ensure_ascii=False, indent=1)
 
 
 def get_json(url, headers=None, body=None):
@@ -151,6 +167,9 @@ Opportunity Score: (১০০-এর মধ্যে, এক লাইনে ক
 {comments}
 """
 
+records = load_records()
+today = time.strftime("%Y-%m-%d", time.gmtime())
+
 # ১. Hacker News থেকে সাম্প্রতিক আলোচনা খোঁজা
 queries = [
     "frustrated with",
@@ -160,7 +179,7 @@ queries = [
     "struggling with",
     "pain point",
 ]
-since = int(time.time()) - 14 * 24 * 3600
+since = int(time.time()) - 30 * 24 * 3600
 found = {}
 for q in queries:
     params = urllib.parse.urlencode({
@@ -175,25 +194,31 @@ for q in queries:
     except Exception as e:
         print("HN থেকে আনা ব্যর্থ:", q, e)
 
-# ২. সবচেয়ে আলোচিত ৩টা বাছাই
+if not found:
+    raise SystemExit("HN থেকে কোনো আলোচনা পাওয়া যায়নি")
+
+# ২. আগে দেখা আলোচনা বাদ দিয়ে সবচেয়ে আলোচিত ৩টা বাছাই
+fresh = [h for h in found.values() if h["objectID"] not in records]
 cands = sorted(
-    found.values(),
+    fresh,
     key=lambda h: (h.get("points") or 0) + 2 * (h.get("num_comments") or 0),
     reverse=True,
 )[:3]
 print("প্রার্থী:", [c.get("title") for c in cands])
 if not cands:
-    raise SystemExit("কোনো আলোচনা পাওয়া যায়নি")
+    print("নতুন কোনো আলোচনা নেই, এবার পোস্ট হয়নি")
+    sys.exit(0)
 
 # ৩. Gemini দিয়ে পোস্ট লেখানো
 for c in cands:
+    oid = c["objectID"]
     prompt = PROMPT.format(
         title=c.get("title"),
         date=(c.get("created_at") or "")[:10],
         points=c.get("points"),
         ncom=c.get("num_comments"),
         body=clean(c.get("story_text"), 1500) or "(কোনো বিবরণ নেই)",
-        comments="\n".join("- " + t for t in comments_of(c["objectID"])),
+        comments="\n".join("- " + t for t in comments_of(oid)),
     )
     try:
         post = ask_gemini(prompt)
@@ -201,12 +226,16 @@ for c in cands:
         raise SystemExit(f"Gemini ব্যর্থ: {e.code} {e.read().decode('utf-8')[:300]}")
     if post.strip().upper().startswith("NONE"):
         print("উপযুক্ত নয়, পরেরটা:", c.get("title"))
+        records[oid] = {"title": c.get("title"), "date": today, "status": "skipped"}
+        save_records(records)
         continue
-    link = f"https://news.ycombinator.com/item?id={c['objectID']}"
+    link = f"https://news.ycombinator.com/item?id={oid}"
     try:
         send_telegram(to_html(post) + "\n\n🔗 <b>মূল সোর্স:</b> " + esc(link))
     except urllib.error.HTTPError as e:
         raise SystemExit(f"টেলিগ্রাম ব্যর্থ: {e.code} {e.read().decode('utf-8')[:300]}")
+    records[oid] = {"title": c.get("title"), "date": today, "status": "posted"}
+    save_records(records)
     print("পোস্ট হয়েছে:", c.get("title"))
     break
 else:
