@@ -12,6 +12,27 @@ TG_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 TG_CHANNEL = os.environ["TELEGRAM_CHANNEL"]
 MODEL = "gemini-flash-lite-latest"
 
+# প্রতিটি শিরোনামের জন্য ইমোজি
+LABELS = {
+    "শিরোনাম": "🎯",
+    "সমস্যাটি কী": "🧩",
+    "কারা সমস্যায় পড়ছে": "👥",
+    "বাস্তব প্রমাণ": "🔍",
+    "বর্তমান সমাধানের দুর্বলতা": "⚠️",
+    "সম্ভাব্য ডিজিটাল সমাধান ও প্রস্তাবিত পণ্য": "💡",
+    "প্রাথমিক সংস্করণের ফিচার": "🛠️",
+    "টার্গেট গ্রাহক ও আয়ের পদ্ধতি": "💰",
+    "প্রতিযোগী ও বিকল্প": "🏁",
+    "ঝুঁকি ও চ্যালেঞ্জ": "🚧",
+    "কীভাবে যাচাই করব": "✅",
+    "Opportunity Score": "📊",
+    "প্রমাণের মান": "🧪",
+}
+
+
+def esc(s):
+    return html.escape(s, quote=False)
+
 
 def get_json(url, headers=None, body=None):
     data = json.dumps(body).encode("utf-8") if body is not None else None
@@ -54,12 +75,36 @@ def ask_gemini(prompt):
     return "".join(p.get("text", "") for p in parts).strip()
 
 
+def to_html(post):
+    post = post.replace("*", "").replace("`", "")[:3800]
+    lines = []
+    for line in post.splitlines():
+        line = re.sub(r"^#+\s*", "", line.strip())
+        if not line:
+            continue
+        matched = False
+        for label, emoji in LABELS.items():
+            m = re.match(rf"^{re.escape(label)}\s*[:：]\s*(.*)$", line)
+            if m:
+                rest = esc(m.group(1))
+                if label == "শিরোনাম":
+                    lines.append(f"{emoji} <b>{rest}</b>")
+                else:
+                    lines.append(f"\n{emoji} <b>{esc(label)}:</b> {rest}".rstrip())
+                matched = True
+                break
+        if not matched:
+            lines.append(esc(line))
+    return "\n".join(lines).strip()
+
+
 def send_telegram(text):
     get_json(
         f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage",
         body={
             "chat_id": TG_CHANNEL,
-            "text": text[:4000],
+            "text": text,
+            "parse_mode": "HTML",
             "link_preview_options": {"is_disabled": True},
         },
     )
@@ -71,10 +116,16 @@ PROMPT = """তুমি একজন স্টার্টআপ গবেষ�
 - যদি এই আলোচনায় এমন কোনো বাস্তব সমস্যা না থাকে যা সফটওয়্যার, অ্যাপ বা AI দিয়ে সমাধান করে ব্যবসা করা যায়, তাহলে শুধু একটা শব্দ লেখো: NONE
 - কোনো সংখ্যা, বাজারের আকার, প্রতিযোগীর নাম বা তথ্য বানিয়ে লিখবে না। নিশ্চিত না হলে লেখো "তথ্য অপর্যাপ্ত, যাচাই প্রয়োজন"।
 - প্রমাণ মাত্র একটা আলোচনা থেকে এলে প্রমাণের মান "নিম্ন" বা "মাঝারি" লেখো।
-- পুরো লেখা ৩০০০ অক্ষরের মধ্যে রাখো। কোনো মার্কডাউন চিহ্ন (*, #, _) ব্যবহার করবে না।
+- পুরো লেখা ৩০০০ অক্ষরের মধ্যে রাখো। মার্কডাউন চিহ্ন (*, #, _) ব্যবহার করবে না।
 
-পোস্টের কাঠামো (প্রতিটি শিরোনাম নতুন লাইনে):
-শিরোনাম: (এক বাক্যে সমস্যা)
+ভাষার ধরন:
+- এমনভাবে লেখো যেন একজন স্মার্ট, মজার বন্ধু সহজ ভাষায় গল্পের মতো বোঝাচ্ছে। কঠিন শব্দ আর শুকনো অনুবাদ-অনুবাদ ভাব এড়াও।
+- মাঝে মাঝে হালকা রসিকতা বা সহজ উপমা দিতে পারো, কিন্তু প্রমাণ আর তথ্যের ব্যাপারে কঠোর থাকো, কিছু বানাবে না।
+- প্রতিটি অংশের লেখায় ১–২টা প্রাসঙ্গিক ইমোজি ব্যবহার করো। নিচের শিরোনামগুলোর আগে ইমোজি দিতে হবে না, সেটা আমরা নিজেই বসাই।
+- ফিচারগুলো আলাদা লাইনে "• " দিয়ে শুরু করে লেখো।
+
+পোস্টের কাঠামো (প্রতিটি শিরোনাম হুবহু এই নামে, নতুন লাইনে, শেষে কোলন দিয়ে):
+শিরোনাম: (এক বাক্যে সমস্যা, আকর্ষণীয়ভাবে)
 সমস্যাটি কী:
 কারা সমস্যায় পড়ছে:
 বাস্তব প্রমাণ: (আলোচনার সারাংশ, কমেন্টে মানুষ কী বলেছে)
@@ -149,7 +200,10 @@ for c in cands:
         print("উপযুক্ত নয়, পরেরটা:", c.get("title"))
         continue
     link = f"https://news.ycombinator.com/item?id={c['objectID']}"
-    send_telegram(post + "\n\nমূল সোর্স: " + link)
+    try:
+        send_telegram(to_html(post) + "\n\n🔗 <b>মূল সোর্স:</b> " + esc(link))
+    except urllib.error.HTTPError as e:
+        raise SystemExit(f"টেলিগ্রাম ব্যর্থ: {e.code} {e.read().decode('utf-8')[:300]}")
     print("পোস্ট হয়েছে:", c.get("title"))
     break
 else:
