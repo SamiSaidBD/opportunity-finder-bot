@@ -7,12 +7,8 @@ import urllib.error
 GEMINI_KEY = os.environ["GEMINI_API_KEY"]
 TG_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 TG_CHANNEL = os.environ["TELEGRAM_CHANNEL"]
-MODELS = [
-    "gemini-flash-lite-latest",
-    "gemini-flash-latest",
-    "gemini-2.5-flash-lite",
-    "gemini-2.5-flash",
-]
+BASE = "https://generativelanguage.googleapis.com/v1beta"
+GH = {"x-goog-api-key": GEMINI_KEY}
 
 PROMPT = """Use Google Search to find recent Reddit discussions (from the last 30 days if possible) where people complain about a specific problem, or ask for a tool or solution that doesn't seem to exist.
 List 5 different discussions. For each one give: the subreddit, a one-line description of the problem, and what people in the comments said.
@@ -39,17 +35,18 @@ def real_url(u):
     return u
 
 
-def post_json(url, body, headers=None):
+def request_json(url, body=None, headers=None):
     h = {"Content-Type": "application/json"}
     if headers:
         h.update(headers)
-    req = urllib.request.Request(url, data=json.dumps(body).encode("utf-8"), headers=h)
+    data = json.dumps(body).encode("utf-8") if body is not None else None
+    req = urllib.request.Request(url, data=data, headers=h)
     with urllib.request.urlopen(req, timeout=120) as r:
         return json.loads(r.read().decode("utf-8"))
 
 
 def send(text):
-    post_json(
+    request_json(
         f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage",
         {
             "chat_id": TG_CHANNEL,
@@ -59,39 +56,48 @@ def send(text):
     )
 
 
+# ১. উপলব্ধ Flash মডেলের তালিকা (gemini-2 ধরনেরগুলো আগে)
+models = request_json(f"{BASE}/models?pageSize=200", headers=GH).get("models", [])
+skip = ["image", "tts", "audio", "live", "embedding", "robotics", "computer", "native"]
+names = []
+for m in models:
+    n = m["name"].replace("models/", "")
+    if "flash" in n and "generateContent" in m.get("supportedGenerationMethods", []):
+        if not any(s in n for s in skip):
+            names.append(n)
+names = sorted(set(names), key=lambda n: (0 if "gemini-2" in n else 1, n))[:12]
+print("চেষ্টা করা হবে:", names)
+
+# ২. একে একে চেষ্টা
 result = None
 used = ""
 errors = []
-for model in MODELS:
+for model in names:
     try:
-        result = post_json(
-            f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
+        result = request_json(
+            f"{BASE}/models/{model}:generateContent",
             {
                 "contents": [{"parts": [{"text": PROMPT}]}],
                 "tools": [{"google_search": {}}],
             },
-            {"x-goog-api-key": GEMINI_KEY},
+            GH,
         )
         used = model
         break
     except urllib.error.HTTPError as e:
         body = e.read().decode("utf-8")
-        try:
-            msg = json.loads(body)["error"]["message"][:100]
-        except Exception:
-            msg = body[:100]
-        quota = re.findall(r'"quota(?:Metric|Id|Value)":\s*"([^"]+)"', body)
-        errors.append(f"{model}: {e.code} {msg}\n   {' | '.join(quota[:4])}")
+        errors.append(f"{model}: {e.code}")
         print("ব্যর্থ:", model, e.code)
-        print(body[:2000])
+        print(body[:1500])
     except Exception as e:
         errors.append(f"{model}: {e}")
         print("ব্যর্থ:", model, e)
 
 if result is None:
-    send("❌ Search grounding টেস্ট ব্যর্থ\n\n" + "\n\n".join(errors))
+    send("❌ Search grounding কোনো মডেলে চলেনি\n\nচেষ্টা করা মডেল:\n" + "\n".join(errors or ["(কোনো মডেল পাওয়া যায়নি)"]))
     raise SystemExit("সব মডেল ব্যর্থ")
 
+# ৩. ফলাফল
 cand = result["candidates"][0]
 text = "".join(p.get("text", "") for p in cand.get("content", {}).get("parts", []))
 gm = cand.get("groundingMetadata", {})
@@ -114,7 +120,7 @@ lines = [
     f"মোট সোর্স: {len(urls)}, এর মধ্যে Reddit: {len(reddit)}",
 ]
 if errors:
-    lines.append("আগের ব্যর্থ মডেল: " + ", ".join(e.split(":")[0] for e in errors))
+    lines.append("আগে ব্যর্থ: " + ", ".join(errors))
 if not chunks:
     lines.append("⚠️ গ্রাউন্ডিং তথ্য আসেনি, মডেল সম্ভবত সার্চই করেনি")
 lines += ["", "Reddit লিংক:"]
