@@ -8,11 +8,17 @@ import urllib.request
 import urllib.error
 import urllib.parse
 
-GEMINI_KEY = os.environ["GEMINI_API_KEY"]
+PROVIDER = os.environ.get("LLM_PROVIDER", "groq")
+GROQ_KEY = os.environ.get("GROQ_API_KEY", "")
+GROQ_MODEL = os.environ.get("GROQ_MODEL", "openai/gpt-oss-120b")
+GEMINI_KEY = os.environ.get("GEMINI_API_KEY", "")
+GEMINI_MODEL = "gemini-flash-lite-latest"
 TG_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 TG_CHANNEL = os.environ["TELEGRAM_CHANNEL"]
-MODEL = "gemini-flash-lite-latest"
 RECORD_FILE = "data/posted.json"
+
+if PROVIDER == "groq" and not GROQ_KEY:
+    raise SystemExit("GROQ_API_KEY সেট করা নেই")
 
 # প্রতিটি শিরোনামের জন্য ইমোজি
 LABELS = {
@@ -30,6 +36,13 @@ LABELS = {
     "Opportunity Score": "📊",
     "প্রমাণের মান": "🧪",
 }
+
+# সিকিউরিটি/exploit ধরনের আলোচনা বাদ
+BLOCK = re.compile(
+    r"\b(rce|cve(?:-\d+)*s?|exploits?|zero-?days?|0-?days?|malware|ransomware|"
+    r"vulnerabilit(?:y|ies)|ddos|backdoors?|embargo)\b",
+    re.I,
+)
 
 
 def esc(s):
@@ -52,11 +65,14 @@ def save_records(rec):
 
 def get_json(url, headers=None, body=None):
     data = json.dumps(body).encode("utf-8") if body is not None else None
-    h = {"Content-Type": "application/json"}
+    h = {
+        "Content-Type": "application/json",
+        "User-Agent": "Mozilla/5.0 (compatible; opportunity-bot/1.0)",
+    }
     if headers:
         h.update(headers)
     req = urllib.request.Request(url, data=data, headers=h)
-    with urllib.request.urlopen(req, timeout=60) as r:
+    with urllib.request.urlopen(req, timeout=90) as r:
         return json.loads(r.read().decode("utf-8"))
 
 
@@ -73,15 +89,15 @@ def comments_of(story_id):
         print("কমেন্ট আনা যায়নি:", e)
         return []
     out = []
-    for c in item.get("children", [])[:6]:
-        t = clean(c.get("text"), 400)
+    for c in item.get("children", [])[:5]:
+        t = clean(c.get("text"), 350)
         if t:
             out.append(t)
     return out
 
 
 def ask_gemini(prompt):
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL}:generateContent"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
     out = get_json(
         url,
         headers={"x-goog-api-key": GEMINI_KEY},
@@ -89,6 +105,41 @@ def ask_gemini(prompt):
     )
     parts = out["candidates"][0]["content"]["parts"]
     return "".join(p.get("text", "") for p in parts).strip()
+
+
+def ask_groq(prompt):
+    url = "https://api.groq.com/openai/v1/chat/completions"
+    headers = {"Authorization": f"Bearer {GROQ_KEY}"}
+    body = {
+        "model": GROQ_MODEL,
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0.7,
+        "max_completion_tokens": 3000,
+        "reasoning_effort": "low",
+    }
+    try:
+        out = get_json(url, headers=headers, body=body)
+    except urllib.error.HTTPError as e:
+        if e.code == 400:
+            body.pop("reasoning_effort")
+            out = get_json(url, headers=headers, body=body)
+        else:
+            raise
+    return (out["choices"][0]["message"].get("content") or "").strip()
+
+
+def ask_llm(prompt):
+    if PROVIDER == "gemini":
+        return ask_gemini(prompt)
+    for attempt in range(2):
+        try:
+            return ask_groq(prompt)
+        except urllib.error.HTTPError as e:
+            if e.code in (429, 500, 502, 503) and attempt == 0:
+                print("সাময়িক সমস্যা, ২৫ সেকেন্ড অপেক্ষা:", e.code)
+                time.sleep(25)
+                continue
+            raise
 
 
 def to_html(post):
@@ -126,44 +177,44 @@ def send_telegram(text):
     )
 
 
-PROMPT = """তুমি একজন স্টার্টআপ গবেষক। নিচে Hacker News-এর একটা আলোচনার তথ্য দেওয়া আছে। শুধু এই তথ্যের ওপর ভিত্তি করে বাংলায় একটা গবেষণা পোস্ট লেখো।
+PROMPT = """You are a startup researcher. Below is information about one Hacker News discussion. Write ONE research post in Bengali, based ONLY on this information.
 
-নিয়ম:
-- যদি এই আলোচনায় এমন কোনো বাস্তব সমস্যা না থাকে যা সফটওয়্যার, অ্যাপ বা AI দিয়ে সমাধান করে ব্যবসা করা যায়, তাহলে শুধু একটা শব্দ লেখো: NONE
-- কোনো সংখ্যা, বাজারের আকার, প্রতিযোগীর নাম বা তথ্য বানিয়ে লিখবে না। নিশ্চিত না হলে লেখো "তথ্য অপর্যাপ্ত, যাচাই প্রয়োজন"।
-- প্রমাণ মাত্র একটা আলোচনা থেকে এলে প্রমাণের মান "নিম্ন" বা "মাঝারি" লেখো।
-- পুরো লেখা ৩০০০ অক্ষরের মধ্যে রাখো। মার্কডাউন চিহ্ন (*, #, _) ব্যবহার করবে না।
+Rules:
+- If the discussion does not contain a real problem that could be solved with software, an app or AI and turned into a business, reply with only one word: NONE
+- Never invent numbers, market sizes, competitor names or facts. If you are not sure, write "তথ্য অপর্যাপ্ত, যাচাই প্রয়োজন".
+- If the evidence comes from only one discussion, rate the evidence quality "নিম্ন" or "মাঝারি".
+- Keep the whole post under 3000 characters. Do not use markdown symbols (*, #, _).
 
-ভাষার ধরন:
-- এমন সুরে লেখো, যেন একজন স্মার্ট ও অভিজ্ঞ বন্ধু সহজ ভাষায় পরিষ্কার করে বুঝিয়ে বলছেন। সুরটা আন্তরিক ও বন্ধুসুলভ, কিন্তু গোছানো ও পেশাদার।
-- ভাষা একদম সহজ রাখো। বাক্য ছোট হবে, শব্দ হবে রোজকার কথাবার্তার কাছাকাছি। কঠিন শব্দ আর শুকনো অনুবাদ-অনুবাদ ভাব এড়াও।
-- পুরো পোস্টে ১–২ জায়গায় একটা বুদ্ধিদীপ্ত রসিকতা বা সহজ উপমা দাও, যাতে পড়তে মজা লাগে। তবে ইয়ার্কি, আড্ডার শব্দ (যেমন "দোস্ত", "ভাই", "জমজমাট") বা বাড়াবাড়ি করবে না।
-- প্রমাণ আর তথ্যের ব্যাপারে কঠোর থাকো, কিছু বানাবে না।
-- প্রযুক্তি ও ব্যবসার পরিচিত ইংরেজি শব্দ অনুবাদ না করে ইংরেজিতেই লেখো। যেমন: black box, SaaS, MVP, API, workflow, dashboard, startup, subscription, feedback, automation। যে শব্দ বাংলা করলে অর্থ বদলে যায় বা অদ্ভুত শোনায়, সেটাও ইংরেজিতেই রাখো।
-- ইমোজি খুব কম ব্যবহার করো, পুরো পোস্টে সর্বোচ্চ ২টা। নিচের শিরোনামগুলোর আগে ইমোজি দিতে হবে না, সেটা আমরা নিজেই বসাই।
-- ফিচারগুলো আলাদা লাইনে "• " দিয়ে শুরু করে লেখো।
+Language style (the post must be in Bengali):
+- Friendly but professional, like a smart, experienced friend explaining things clearly in simple language. Warm and sincere, but organized and professional.
+- Use very simple Bengali: short sentences, everyday words. Avoid hard words and a stiff word-for-word translation feel.
+- Use 1-2 clever jokes or simple analogies in the whole post so it is fun to read. No slang such as "দোস্ত", "ভাই", "জমজমাট" and no over-the-top tone.
+- Be strict about evidence and facts, invent nothing.
+- Keep well-known English tech and business words in English, do not translate them: black box, SaaS, MVP, API, workflow, dashboard, startup, subscription, feedback, automation. Also keep any word in English if its Bengali translation would change the meaning or sound odd.
+- Use very few emojis: at most 2 in the whole post. Do not put emojis before the section titles (we add those ourselves).
+- Write the features on separate lines starting with "• ".
 
-পোস্টের কাঠামো (প্রতিটি শিরোনাম হুবহু এই নামে, নতুন লাইনে, শেষে কোলন দিয়ে):
-শিরোনাম: (এক বাক্যে সমস্যা, আকর্ষণীয়ভাবে)
+Post structure (each section title exactly as written below, on a new line, ending with a colon):
+শিরোনাম: (one sentence stating the problem, in an engaging way)
 সমস্যাটি কী:
 কারা সমস্যায় পড়ছে:
-বাস্তব প্রমাণ: (আলোচনার সারাংশ, কমেন্টে মানুষ কী বলেছে)
+বাস্তব প্রমাণ: (summary of the discussion and what people said in the comments)
 বর্তমান সমাধানের দুর্বলতা:
 সম্ভাব্য ডিজিটাল সমাধান ও প্রস্তাবিত পণ্য:
-প্রাথমিক সংস্করণের ফিচার: (৩–৫টি)
+প্রাথমিক সংস্করণের ফিচার: (3 to 5 features)
 টার্গেট গ্রাহক ও আয়ের পদ্ধতি:
 প্রতিযোগী ও বিকল্প:
 ঝুঁকি ও চ্যালেঞ্জ:
-কীভাবে যাচাই করব: (বড় বিনিয়োগের আগে বাস্তব পদক্ষেপ)
-Opportunity Score: (১০০-এর মধ্যে, এক লাইনে কারণসহ)
-প্রমাণের মান: (উচ্চ/মাঝারি/নিম্ন, কারণসহ)
+কীভাবে যাচাই করব: (real steps to validate before a big investment)
+Opportunity Score: (out of 100, one line with the reason)
+প্রমাণের মান: (উচ্চ/মাঝারি/নিম্ন, with the reason)
 
-আলোচনার তথ্য:
-শিরোনাম: {title}
-তারিখ: {date}
-পয়েন্ট: {points}, কমেন্ট: {ncom}
-বিবরণ: {body}
-কিছু কমেন্ট:
+Discussion information:
+Title: {title}
+Date: {date}
+Points: {points}, comments: {ncom}
+Description: {body}
+Some comments:
 {comments}
 """
 
@@ -197,8 +248,18 @@ for q in queries:
 if not found:
     raise SystemExit("HN থেকে কোনো আলোচনা পাওয়া যায়নি")
 
-# ২. আগে দেখা আলোচনা বাদ দিয়ে সবচেয়ে আলোচিত ৩টা বাছাই
-fresh = [h for h in found.values() if h["objectID"] not in records]
+# ২. আগে দেখা আর সিকিউরিটি-ধরনের আলোচনা বাদ দিয়ে সেরা ৩টা বাছাই
+fresh = []
+for h in found.values():
+    oid = h["objectID"]
+    if oid in records:
+        continue
+    if BLOCK.search(h.get("title") or ""):
+        records[oid] = {"title": h.get("title"), "date": today, "status": "skipped"}
+        continue
+    fresh.append(h)
+save_records(records)
+
 cands = sorted(
     fresh,
     key=lambda h: (h.get("points") or 0) + 2 * (h.get("num_comments") or 0),
@@ -209,7 +270,7 @@ if not cands:
     print("নতুন কোনো আলোচনা নেই, এবার পোস্ট হয়নি")
     sys.exit(0)
 
-# ৩. Gemini দিয়ে পোস্ট লেখানো
+# ৩. AI দিয়ে পোস্ট লেখানো
 for c in cands:
     oid = c["objectID"]
     prompt = PROMPT.format(
@@ -217,13 +278,13 @@ for c in cands:
         date=(c.get("created_at") or "")[:10],
         points=c.get("points"),
         ncom=c.get("num_comments"),
-        body=clean(c.get("story_text"), 1500) or "(কোনো বিবরণ নেই)",
+        body=clean(c.get("story_text"), 1200) or "(no description)",
         comments="\n".join("- " + t for t in comments_of(oid)),
     )
     try:
-        post = ask_gemini(prompt)
+        post = ask_llm(prompt)
     except urllib.error.HTTPError as e:
-        raise SystemExit(f"Gemini ব্যর্থ: {e.code} {e.read().decode('utf-8')[:300]}")
+        raise SystemExit(f"AI ব্যর্থ: {e.code} {e.read().decode('utf-8')[:300]}")
     if post.strip().upper().startswith("NONE"):
         print("উপযুক্ত নয়, পরেরটা:", c.get("title"))
         records[oid] = {"title": c.get("title"), "date": today, "status": "skipped"}
