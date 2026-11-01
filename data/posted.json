@@ -3,5 +3,20 @@
   "title": "Ask HN: If the models are so good, why doesn't OpenAI just start 100 companies?",
   "date": "2026-10-30",
   "status": "posted"
+ },
+ "50193416": {
+  "title": "Tell HN: I unknowingly broke the PHP RCE embargo. I am sorry",
+  "date": "2026-11-01",
+  "status": "skipped"
+ },
+ "50167754": {
+  "title": "Tell HN: 2x PHP RCE CVEs with CVSS 10.0 Incoming",
+  "date": "2026-11-01",
+  "status": "skipped"
+ },
+ "50151036": {
+  "title": "Ask HN: How to deal with shipping AI-written code you don't understand?",
+  "date": "2026-11-01",
+  "status": "posted"
  }
 }
