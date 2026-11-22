@@ -318,5 +318,10 @@
   "title": "GitLab 19.6.0 is out and still vulnerable to Ruby2Shell and NGINX2Root",
   "date": "2026-11-22",
   "status": "posted"
+ },
+ "50585962": {
+  "title": "Tell HN: OpenRouter prompts to Minimax may have been read",
+  "date": "2026-11-22",
+  "status": "posted"
  }
 }
